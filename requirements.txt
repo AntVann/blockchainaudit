@@ -1,0 +1,10 @@
+# Use pre-built wheels where possible
+cryptography>=40.0.2
+protobuf>=4.22.3
+uuid>=1.30
+
+# Note: grpcio and grpcio-tools require Microsoft Visual C++ 14.0 or greater
+# If you encounter build errors, install Microsoft C++ Build Tools from:
+# https://visualstudio.microsoft.com/visual-cpp-build-tools/
+grpcio>=1.54.0
+grpcio-tools>=1.54.0
