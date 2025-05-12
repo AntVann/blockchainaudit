@@ -94,14 +94,12 @@ def verify_signature(public_key, data, signature):
     Returns:
         bool: True if signature is valid, False otherwise
     """
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-
-    if isinstance(signature, str):
-        signature = base64.b64decode(signature)
 
     try:
-        public_key.verify(signature, data, padding.PKCS1v15(), hashes.SHA256())
+        public_key.verify(base64.b64decode(signature),
+                        data.encode("utf-8"),
+                        padding.PKCS1v15(), 
+                        hashes.SHA256())
         return True
     except Exception:
         return False

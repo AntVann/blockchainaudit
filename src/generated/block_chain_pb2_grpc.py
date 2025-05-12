@@ -42,13 +42,23 @@ class BlockChainServiceStub(object):
                 _registered_method=True)
         self.ProposeBlock = channel.unary_unary(
                 '/blockchain.BlockChainService/ProposeBlock',
-                request_serializer=block__chain__pb2.BlockProposal.SerializeToString,
+                request_serializer=block__chain__pb2.Block.SerializeToString,
                 response_deserializer=block__chain__pb2.BlockVoteResponse.FromString,
                 _registered_method=True)
-        self.VoteOnBlock = channel.unary_unary(
-                '/blockchain.BlockChainService/VoteOnBlock',
-                request_serializer=block__chain__pb2.Vote.SerializeToString,
-                response_deserializer=block__chain__pb2.BlockVoteResponse.FromString,
+        self.CommitBlock = channel.unary_unary(
+                '/blockchain.BlockChainService/CommitBlock',
+                request_serializer=block__chain__pb2.Block.SerializeToString,
+                response_deserializer=block__chain__pb2.BlockCommitResponse.FromString,
+                _registered_method=True)
+        self.GetBlock = channel.unary_unary(
+                '/blockchain.BlockChainService/GetBlock',
+                request_serializer=block__chain__pb2.GetBlockRequest.SerializeToString,
+                response_deserializer=block__chain__pb2.GetBlockResponse.FromString,
+                _registered_method=True)
+        self.SendHeartbeat = channel.unary_unary(
+                '/blockchain.BlockChainService/SendHeartbeat',
+                request_serializer=block__chain__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=block__chain__pb2.HeartbeatResponse.FromString,
                 _registered_method=True)
 
 
@@ -67,9 +77,20 @@ class BlockChainServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def VoteOnBlock(self, request, context):
-        """rpc FinalizeBlock();
-        """
+    def CommitBlock(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBlock(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendHeartbeat(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -84,13 +105,23 @@ def add_BlockChainServiceServicer_to_server(servicer, server):
             ),
             'ProposeBlock': grpc.unary_unary_rpc_method_handler(
                     servicer.ProposeBlock,
-                    request_deserializer=block__chain__pb2.BlockProposal.FromString,
+                    request_deserializer=block__chain__pb2.Block.FromString,
                     response_serializer=block__chain__pb2.BlockVoteResponse.SerializeToString,
             ),
-            'VoteOnBlock': grpc.unary_unary_rpc_method_handler(
-                    servicer.VoteOnBlock,
-                    request_deserializer=block__chain__pb2.Vote.FromString,
-                    response_serializer=block__chain__pb2.BlockVoteResponse.SerializeToString,
+            'CommitBlock': grpc.unary_unary_rpc_method_handler(
+                    servicer.CommitBlock,
+                    request_deserializer=block__chain__pb2.Block.FromString,
+                    response_serializer=block__chain__pb2.BlockCommitResponse.SerializeToString,
+            ),
+            'GetBlock': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBlock,
+                    request_deserializer=block__chain__pb2.GetBlockRequest.FromString,
+                    response_serializer=block__chain__pb2.GetBlockResponse.SerializeToString,
+            ),
+            'SendHeartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.SendHeartbeat,
+                    request_deserializer=block__chain__pb2.HeartbeatRequest.FromString,
+                    response_serializer=block__chain__pb2.HeartbeatResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -145,7 +176,7 @@ class BlockChainService(object):
             request,
             target,
             '/blockchain.BlockChainService/ProposeBlock',
-            block__chain__pb2.BlockProposal.SerializeToString,
+            block__chain__pb2.Block.SerializeToString,
             block__chain__pb2.BlockVoteResponse.FromString,
             options,
             channel_credentials,
@@ -158,7 +189,7 @@ class BlockChainService(object):
             _registered_method=True)
 
     @staticmethod
-    def VoteOnBlock(request,
+    def CommitBlock(request,
             target,
             options=(),
             channel_credentials=None,
@@ -171,9 +202,63 @@ class BlockChainService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/blockchain.BlockChainService/VoteOnBlock',
-            block__chain__pb2.Vote.SerializeToString,
-            block__chain__pb2.BlockVoteResponse.FromString,
+            '/blockchain.BlockChainService/CommitBlock',
+            block__chain__pb2.Block.SerializeToString,
+            block__chain__pb2.BlockCommitResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBlock(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/blockchain.BlockChainService/GetBlock',
+            block__chain__pb2.GetBlockRequest.SerializeToString,
+            block__chain__pb2.GetBlockResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SendHeartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/blockchain.BlockChainService/SendHeartbeat',
+            block__chain__pb2.HeartbeatRequest.SerializeToString,
+            block__chain__pb2.HeartbeatResponse.FromString,
             options,
             channel_credentials,
             insecure,

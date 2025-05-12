@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import glob
 import re
+import logging
 from concurrent import futures
 from collections import deque
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -23,6 +24,7 @@ from cryptography.hazmat.backends import default_backend
 
 # Use standard imports
 from src.utils.crypto import verify_signature
+from src.utils.config import load_config, get_peer_addresses, get_server_config
 from src.generated import (
     common_pb2,
     file_audit_pb2,
@@ -30,6 +32,11 @@ from src.generated import (
     block_chain_pb2,
     block_chain_pb2_grpc,
 )
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class Mempool:
@@ -156,14 +163,14 @@ class FileAuditServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
                     if audit.req_id == request.req_id:
                         # Found the audit in a block, create block header for response
                         block_header = file_audit_pb2.BlockHeader(
-                            block_hash=block.block_hash,
-                            block_number=block.block_number,
-                            timestamp=block.timestamp,
-                            previous_block_hash=block.previous_block_hash,
+                            block_hash=block.hash,
+                            block_number=block.id,
+                            timestamp=getattr(block, 'timestamp', 0),  # Use timestamp if exists, 0 otherwise
+                            previous_block_hash=block.previous_hash,
                             merkle_root=block.merkle_root
                         )
-                        blockchain_tx_hash = block.block_hash
-                        print(f"Audit {request.req_id} already included in block {block.block_number}")
+                        blockchain_tx_hash = block.hash
+                        print(f"Audit {request.req_id} already included in block {block.id}")
                         break
                 if block_header:
                     break
@@ -361,8 +368,8 @@ class Blockchain:
                     
                     # Add to in-memory blockchain
                     self.blocks.append(block)
-                    self.block_map[block.block_hash] = block
-                    print(f"Loaded block {block.block_number} with hash {block.block_hash}")
+                    self.block_map[block.hash] = block
+                    print(f"Loaded block {block.id} with hash {block.hash}")
                 except Exception as e:
                     print(f"Error loading block file {block_file}: {str(e)}")
             
@@ -384,22 +391,22 @@ class Blockchain:
         with self.lock:
             # Verify chaining if not genesis block
             if len(self.blocks) > 0:
-                if block.previous_block_hash != self.blocks[-1].block_hash:
+                if block.previous_hash != self.blocks[-1].hash:
                     print(f"Block chaining error: Previous hash doesn't match last block")
                     return False
                     
-                if block.block_number != len(self.blocks) + 1:
-                    print(f"Block number error: Expected {len(self.blocks) + 1}, got {block.block_number}")
+                if block.id != len(self.blocks) + 1:
+                    print(f"Block number error: Expected {len(self.blocks) + 1}, got {block.id}")
                     return False
             
             # Add the block
             self.blocks.append(block)
-            self.block_map[block.block_hash] = block
+            self.block_map[block.hash] = block
             
             # Save to disk
             self._save_block_to_disk(block)
             
-            print(f"Added block {block.block_hash} to blockchain. Chain length: {len(self.blocks)}")
+            print(f"Added block {block.hash} to blockchain. Chain length: {len(self.blocks)}")
             return True
             
     def _save_block_to_disk(self, block):
@@ -413,14 +420,14 @@ class Blockchain:
             block_dict = MessageToDict(block)
             
             # Create filename
-            filename = f"block_{block.block_number}.json"
+            filename = f"block_{block.id}.json"
             filepath = os.path.join(self.blocks_dir, filename)
             
             # Write to file
             with open(filepath, 'w') as f:
                 json.dump(block_dict, f, indent=2)
                 
-            print(f"Saved block {block.block_number} to {filepath}")
+            print(f"Saved block {block.id} to {filepath}")
         except Exception as e:
             print(f"Error saving block to disk: {str(e)}")
             
@@ -632,18 +639,18 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         return verify_signature(public_key, data, audit.signature)
 
 
-def send_heartbeats(server_address, blockchain_stubs, blockchain, mempool, interval=5):
+def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval=5):
     """
     Periodically send heartbeats to all connected peers.
     
     Args:
         server_address: Local server address (host:port)
-        blockchain_stubs: List of stubs for connected peers
+        peer_stub_map: Dictionary mapping peer addresses to their stubs
         blockchain: Blockchain instance for getting latest block info
         mempool: Mempool instance for getting size
         interval: Interval in seconds between heartbeats
     """
-    print(f"Starting heartbeat sender, sending every {interval} seconds")
+    logger.info(f"Starting heartbeat sender, sending every {interval} seconds to {len(peer_stub_map)} peers")
     
     while True:
         try:
@@ -663,67 +670,83 @@ def send_heartbeats(server_address, blockchain_stubs, blockchain, mempool, inter
             )
             
             # Send heartbeat to all peers
-            for i, stub in enumerate(blockchain_stubs):
+            for peer_address, stub in peer_stub_map.items():
                 try:
-                    # Get peer address for logging
-                    target = "unknown"
-                    try:
-                        if hasattr(stub, '_channel') and hasattr(stub._channel, 'target'):
-                            target = stub._channel.target.decode() if isinstance(stub._channel.target, bytes) else str(stub._channel.target)
-                        elif hasattr(stub, '_channel') and hasattr(stub._channel, '_channel') and hasattr(stub._channel._channel, 'target'):
-                            target = stub._channel._channel.target.decode() if isinstance(stub._channel._channel.target, bytes) else str(stub._channel._channel.target)
-                    except Exception:
-                        # If all fails, use index in the list
-                        target = f"peer-{i}"
+                    # Use the peer address we already know from the map
+                    target = peer_address
                         
                     # Send the heartbeat with a timeout
                     response = stub.SendHeartbeat(
                         heartbeat_request, 
                         timeout=2  # 2 second timeout
                     )
-                    print(f"Sent heartbeat to {target}, response: {response.status}")
+                    logger.info(f"Sent heartbeat to {target}, response: {response.status}")
                     
                 except grpc.RpcError as e:
                     if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                        print(f"Heartbeat timeout for peer {target}")
+                        logger.warning(f"Heartbeat timeout for peer {target}")
                     else:
-                        print(f"Error sending heartbeat to {target}: {e.code()}: {e.details()}")
+                        logger.error(f"Error sending heartbeat to {target}: {e.code()}: {e.details()}")
                 except Exception as e:
-                    print(f"Unexpected error sending heartbeat to peer {target}: {str(e)}")
+                    logger.error(f"Unexpected error sending heartbeat to peer {target}: {str(e)}")
                     
             # Sleep for the interval
             time.sleep(interval)
             
         except Exception as e:
-            print(f"Error in heartbeat loop: {str(e)}")
+            logger.error(f"Error in heartbeat loop: {str(e)}")
             # Don't crash the heartbeat thread, just wait and retry
             time.sleep(interval)
 
 
-def serve(port, peer_addresses, slot_duration=10):
+def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
     """
     Start the server as a follower node.
 
     Args:
         port: Port to listen on
-        peer_addresses: List of peer addresses
+        peer_addresses: List of peer addresses (will be loaded from config if None)
         slot_duration: Not used in follower-only mode
+        config_file: Path to configuration file (optional)
     """
+    # Load configuration if peer_addresses not provided
+    if peer_addresses is None:
+        try:
+            config = load_config(config_file)
+            peer_addresses = get_peer_addresses(config)
+            server_config = get_server_config(config)
+            max_workers = server_config.get('max_workers', 10)
+            heartbeat_interval = server_config.get('heartbeat_interval', 5)
+            logger.info(f"Loaded configuration: {len(peer_addresses)} peers, " 
+                      f"{heartbeat_interval}s heartbeat interval, {max_workers} max workers")
+        except Exception as e:
+            logger.error(f"Error loading configuration: {str(e)}. Using defaults.")
+            peer_addresses = []
+            max_workers = 10
+            heartbeat_interval = 5
+    else:
+        # Use defaults if not loading from config
+        max_workers = 10
+        heartbeat_interval = 5
+        
     # Create a mempool
     mempool = Mempool()
     
     # Create blockchain instance
     blockchain = Blockchain()
 
-    # Create stubs for blockchain services
+    # Create stubs for blockchain services and maintain a mapping of addresses to stubs
     blockchain_stubs = []
+    peer_stub_map = {}
     for address in peer_addresses:
+        logger.info(f"Connecting to peer at {address}")
         channel = grpc.insecure_channel(address)
         stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
         blockchain_stubs.append(stub)
+        peer_stub_map[address] = stub
 
     # Create a server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
 
     # Add servicers to the server
     file_audit_servicer = FileAuditServicer(mempool, blockchain_stubs, blockchain)
@@ -744,13 +767,16 @@ def serve(port, peer_addresses, slot_duration=10):
     print(f"Connected to {len(peer_addresses)} peers: {peer_addresses}")
 
     # Start heartbeat sender thread
-    server_address = f"serhat:{port}"
+    # Use socket.gethostname() to get the local hostname for identification
+    import socket
+    server_address = f"{socket.gethostname()}:{port}"
     heartbeat_thread = threading.Thread(
         target=send_heartbeats, 
-        args=(server_address, blockchain_stubs, blockchain, mempool)
+        args=(server_address, peer_stub_map, blockchain, mempool, heartbeat_interval),
+        daemon=True
     )
-    heartbeat_thread.daemon = True
     heartbeat_thread.start()
+    logger.info(f"Started heartbeat sender thread, will send heartbeats every {heartbeat_interval} seconds to {len(peer_stub_map)} peers")
 
     try:
         while True:
@@ -764,11 +790,13 @@ def main():
     """Main function for the server."""
     parser = argparse.ArgumentParser(description="File Audit Server")
     parser.add_argument("--port", type=int, default=50051, help="Port to listen on")
-    parser.add_argument("--peers", nargs="*", default=[], help="Peer addresses")
+    parser.add_argument("--peers", nargs="*", default=None, help="Peer addresses (overrides config file)")
+    parser.add_argument("--config", type=str, default=None, 
+                       help="Path to configuration file (default: config.yaml in project root)")
 
     args = parser.parse_args()
 
-    serve(args.port, args.peers)
+    serve(args.port, args.peers, config_file=args.config)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+---
+# Blockchain Audit System Configuration
+
+# Peer server configuration
+peers:
+  - address: "169.254.19.242:50052" # sameer
+  - address: "169.254.124.169:50051" # serhat
+  # - address: "169.254.159.92:50053" # suriya
+  # - address: "169.254.183.161:50051" # harsha
+  # - address: "169.254.13.100:50051" # yash
+  - address: "169.254.137.247:50051" # ronak
+  - address: "169.254.55.120:50051" # brandon
+  - address: "169.254.103.106:50051" # jayasurya
+
+# Server configuration
+server:
+  # Heartbeat interval in seconds
+  heartbeat_interval: 5
+  # Maximum workers for thread pool executor
+  max_workers: 10
