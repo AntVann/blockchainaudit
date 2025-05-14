@@ -989,16 +989,17 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
         logger.info(f"Lost election for term {term} with {votes}/{total_nodes} votes")
         return False
 
-def get_local_ip(self):
-        """Get the local IP address of this machine."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("0.0.0.0", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
+def get_local_ip():
+    """Get the local IP address of this machine."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("0.0.0.0", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception as e:
+        logger.error(f"Error getting local IP: {str(e)}")
+        return "127.0.0.1"
 
 def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
     """

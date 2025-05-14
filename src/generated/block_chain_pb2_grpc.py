@@ -60,6 +60,16 @@ class BlockChainServiceStub(object):
                 request_serializer=block__chain__pb2.HeartbeatRequest.SerializeToString,
                 response_deserializer=block__chain__pb2.HeartbeatResponse.FromString,
                 _registered_method=True)
+        self.TriggerElection = channel.unary_unary(
+                '/blockchain.BlockChainService/TriggerElection',
+                request_serializer=block__chain__pb2.TriggerElectionRequest.SerializeToString,
+                response_deserializer=block__chain__pb2.TriggerElectionResponse.FromString,
+                _registered_method=True)
+        self.NotifyLeadership = channel.unary_unary(
+                '/blockchain.BlockChainService/NotifyLeadership',
+                request_serializer=block__chain__pb2.NotifyLeadershipRequest.SerializeToString,
+                response_deserializer=block__chain__pb2.NotifyLeadershipResponse.FromString,
+                _registered_method=True)
 
 
 class BlockChainServiceServicer(object):
@@ -95,6 +105,18 @@ class BlockChainServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def TriggerElection(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NotifyLeadership(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BlockChainServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -122,6 +144,16 @@ def add_BlockChainServiceServicer_to_server(servicer, server):
                     servicer.SendHeartbeat,
                     request_deserializer=block__chain__pb2.HeartbeatRequest.FromString,
                     response_serializer=block__chain__pb2.HeartbeatResponse.SerializeToString,
+            ),
+            'TriggerElection': grpc.unary_unary_rpc_method_handler(
+                    servicer.TriggerElection,
+                    request_deserializer=block__chain__pb2.TriggerElectionRequest.FromString,
+                    response_serializer=block__chain__pb2.TriggerElectionResponse.SerializeToString,
+            ),
+            'NotifyLeadership': grpc.unary_unary_rpc_method_handler(
+                    servicer.NotifyLeadership,
+                    request_deserializer=block__chain__pb2.NotifyLeadershipRequest.FromString,
+                    response_serializer=block__chain__pb2.NotifyLeadershipResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -259,6 +291,60 @@ class BlockChainService(object):
             '/blockchain.BlockChainService/SendHeartbeat',
             block__chain__pb2.HeartbeatRequest.SerializeToString,
             block__chain__pb2.HeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TriggerElection(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/blockchain.BlockChainService/TriggerElection',
+            block__chain__pb2.TriggerElectionRequest.SerializeToString,
+            block__chain__pb2.TriggerElectionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def NotifyLeadership(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/blockchain.BlockChainService/NotifyLeadership',
+            block__chain__pb2.NotifyLeadershipRequest.SerializeToString,
+            block__chain__pb2.NotifyLeadershipResponse.FromString,
             options,
             channel_credentials,
             insecure,
