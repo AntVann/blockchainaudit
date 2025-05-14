@@ -679,7 +679,7 @@ def send_heartbeats(server_address, blockchain_stubs, blockchain, mempool, inter
                     # Send the heartbeat with a timeout
                     response = stub.SendHeartbeat(
                         heartbeat_request, 
-                        timeout=2  # 2 second timeout
+                        timeout=5  # 5 second timeout
                     )
                     print(f"Sent heartbeat to {target}, response: {response.status}")
                     

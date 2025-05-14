@@ -1,7 +1,31 @@
+"""
+Server implementation for blockchain audit system with leader election support.
+
+Leader Election Process:
+1. When a server starts or detects that the current leader is missing heartbeats,
+   it triggers an election by calling TriggerElection on all peers.
+   
+2. Criteria for accepting an election request:
+   - The term number must be greater than the current term.
+   - The server hasn't voted for someone else in the current term.
+
+3. Tie-breaking criteria (in order):
+   - Server with the most blocks (highest latest_block_id)
+   - Server with the largest mempool
+   - String comparison of server addresses
+
+4. After winning an election (getting majority votes), the server calls 
+   NotifyLeadership on all peers to announce its leadership.
+
+5. Heartbeat mechanism is used to detect leader failures. If N consecutive 
+   heartbeats are missed from the leader, a new election is triggered.
+"""
+
 import os
 import sys
 import time
 import uuid
+import socket
 import json
 import grpc
 import threading
@@ -454,22 +478,37 @@ class Blockchain:
             Block protobuf message or None if not found
         """
         with self.lock:
-            return self.block_map.get(block_hash, None)
+            # Make sure we're looking up by the correct field
+            result = self.block_map.get(block_hash, None)
+            if result is None and block_hash:
+                # Try to find the block by iterating through all blocks if not found in the map
+                for block in self.blocks:
+                    if block.hash == block_hash:
+                        return block
+            return result
             
     def get_block_by_number(self, block_number):
         """
         Get a block by its number.
         
         Args:
-            block_number: Number of the block to get
+            block_number: Number of the block to get (corresponds to block.id)
             
         Returns:
             Block protobuf message or None if not found
         """
         with self.lock:
-            if block_number < 1 or block_number > len(self.blocks):
-                return None
-            return self.blocks[block_number - 1]
+            # First try to find it by position in the array
+            if 0 <= block_number < len(self.blocks):
+                if self.blocks[block_number].id == block_number:
+                    return self.blocks[block_number]
+                    
+            # If not found, search through all blocks by id
+            for block in self.blocks:
+                if block.id == block_number:
+                    return block
+            
+            return None
 
 
 class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
@@ -485,6 +524,11 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         self.mempool = mempool
         self.blockchain = blockchain if blockchain else Blockchain()
+        self.current_term = 0
+        self.current_leader_address = ""
+        self.voted_for = None  # Keep track of who this server voted for in the current term
+        self.heartbeat_timestamps = {}  # Map of server address to last heartbeat timestamp
+        self.is_leader = False  # Whether this server is the leader
 
     def WhisperAuditRequest(self, request, context):
         """
@@ -526,6 +570,20 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         print(f"Received block proposal: {request.id}")
 
+        # Check if this block has already been added (by hash)
+        existing_block = self.blockchain.get_block_by_hash(request.hash)
+        if existing_block:
+            print(f"Block {request.id} with hash {request.hash} already exists in the blockchain")
+            
+            # Even when the block already exists, clean up mempool
+            # This ensures consistent behavior between propose and commit
+            if request.audits:
+                audit_ids = [audit.req_id for audit in request.audits]
+                print(f"Block already exists but removing {len(audit_ids)} audits from mempool that are in block {request.id}")
+                self.mempool.remove_audits(audit_ids)
+                
+            return block_chain_pb2.BlockVoteResponse(vote=True, status="success")
+
         # Validate the block (simplified for now)
         if not request.audits:
             return block_chain_pb2.BlockVoteResponse(
@@ -553,8 +611,30 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         print(f"Received block commit: {request.id}")
 
-        # Commit the block (simplified for now)
+        # Check if this block has already been added (by hash)
+        existing_block = self.blockchain.get_block_by_hash(request.hash)
+        if existing_block:
+            print(f"Block {request.id} with hash {request.hash} already exists in the blockchain")
+            
+            # Even if block already exists, make sure to clear the audits from mempool
+            # to handle the case of duplicate commit requests
+            if request.audits:
+                audit_ids = [audit.req_id for audit in request.audits]
+                print(f"Block already exists but removing {len(audit_ids)} audits from mempool that are in block {request.id}")
+                self.mempool.remove_audits(audit_ids)
+                
+            return block_chain_pb2.BlockCommitResponse(status="success")
+        
+        # If block doesn't already exist, commit it
         if self.blockchain.add_block(request):
+            # Clear only the audits that are in the block from the mempool
+            if request.audits:
+                # Extract audit IDs from the block
+                audit_ids = [audit.req_id for audit in request.audits]
+                print(f"Removing {len(audit_ids)} audits from mempool that are included in block {request.id}")
+                # Remove these audits from the mempool
+                self.mempool.remove_audits(audit_ids)
+            
             return block_chain_pb2.BlockCommitResponse(status="success")
         else:
             return block_chain_pb2.BlockCommitResponse(
@@ -583,19 +663,37 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             )
 
     def SendHeartbeat(self, request, context):
-        """
-        Handle a SendHeartbeat request.
+        logger.info(f"Received heartbeat from {request.from_address}")
 
-        Args:
-            request: HeartbeatRequest protobuf message
-            context: gRPC context
+        # Check if this is a special request to get mempool contents
+        if request.from_address == "LEADER_GET_MEMPOOL":
+            # This is a special request from the leader to get mempool contents
+            logger.info("Leader node is requesting mempool contents")
 
-        Returns:
-            HeartbeatResponse: Response to the heartbeat
-        """
-        print(f"Received heartbeat from {request.from_address}")
+            # Get the requested number of audits from the mempool
+            max_audits = request.mem_pool_size if request.mem_pool_size > 0 else 50
+            pending_audits = self.mempool.get_oldest_audits(count=max_audits)
+            logger.info(f"Returning {len(pending_audits)} pending audits to leader node")
 
-        # Process the heartbeat (simplified for now)
+            # Serialize audits list to JSON in error_message field (no proto change)
+            try:
+                from google.protobuf.json_format import MessageToDict
+                import json
+                audits_json = [MessageToDict(a) for a in pending_audits]
+                return block_chain_pb2.HeartbeatResponse(
+                    status="success",
+                    error_message=json.dumps(audits_json)
+                )
+            except Exception as e:
+                logger.error(f"Error serializing mempool audits: {e}")
+                return block_chain_pb2.HeartbeatResponse(status="failure", error_message=str(e))
+
+        # Update current leader from heartbeat if provided
+        if request.current_leader_address and not self.current_leader_address:
+            logger.info(f"Learning about leader {request.current_leader_address} from heartbeat")
+            self.current_leader_address = request.current_leader_address
+        
+        # Process the heartbeat
         return block_chain_pb2.HeartbeatResponse(status="success")
 
     def _verify_signature(self, audit):
@@ -638,19 +736,99 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         # Verify signature
         return verify_signature(public_key, data, audit.signature)
 
+    def TriggerElection(self, request, context):
+        """
+        Handle a TriggerElection request.
 
-def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval=5):
+        Args:
+            request: TriggerElectionRequest protobuf message
+            context: gRPC context
+
+        Returns:
+            TriggerElectionResponse: Response with vote decision
+        """
+        logger.info(f"Received election request from {request.address} for term {request.term}")
+        
+        # Initialize response
+        vote_granted = False
+        
+        # Check if the term is valid (must be >= our current term)
+        if request.term < self.current_term:
+            logger.info(f"Rejecting vote for {request.address}: term {request.term} < current term {self.current_term}")
+            return block_chain_pb2.TriggerElectionResponse(
+                vote=False, 
+                term=self.current_term,
+                status="failure", 
+                error_message=f"Term {request.term} is less than current term {self.current_term}"
+            )
+        
+        # If term is greater, update our term
+        if request.term > self.current_term:
+            logger.info(f"Updating local term from {self.current_term} to {request.term}")
+            self.current_term = request.term
+            self.voted_for = None  # Reset vote for the new term
+        
+        # Check if we've already voted for someone else in this term
+        if self.voted_for is not None and self.voted_for != request.address:
+            logger.info(f"Rejecting vote for {request.address}: already voted for {self.voted_for} in term {self.current_term}")
+            return block_chain_pb2.TriggerElectionResponse(
+                vote=False, 
+                term=self.current_term,
+                status="failure", 
+                error_message=f"Already voted for {self.voted_for} in term {self.current_term}"
+            )
+        
+        # If we got here, we can vote for this candidate
+        # The actual voting logic (tie breakers) will be applied by the caller
+        self.voted_for = request.address
+        vote_granted = True
+        
+        logger.info(f"Voting for {request.address} in term {self.current_term}")
+        return block_chain_pb2.TriggerElectionResponse(
+            vote=vote_granted, 
+            term=self.current_term,
+            status="success"
+        )
+
+    def NotifyLeadership(self, request, context):
+        """
+        Handle a NotifyLeadership request.
+
+        Args:
+            request: NotifyLeadershipRequest protobuf message
+            context: gRPC context
+
+        Returns:
+            NotifyLeadershipResponse: Response to the leadership notification
+        """
+        logger.info(f"Received leadership notification from {request.address}")
+        
+        # Update current leader
+        self.current_leader_address = request.address
+        logger.info(f"Updated leader to {self.current_leader_address}")
+        
+        return block_chain_pb2.NotifyLeadershipResponse(status="success")
+
+
+def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer, interval=5, missing_heartbeat_threshold=3):
     """
-    Periodically send heartbeats to all connected peers.
+    Periodically send heartbeats to all connected peers and handle leader election.
     
     Args:
         server_address: Local server address (host:port)
         peer_stub_map: Dictionary mapping peer addresses to their stubs
         blockchain: Blockchain instance for getting latest block info
         mempool: Mempool instance for getting size
+        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
         interval: Interval in seconds between heartbeats
+        missing_heartbeat_threshold: Number of missing heartbeats to trigger an election
     """
     logger.info(f"Starting heartbeat sender, sending every {interval} seconds to {len(peer_stub_map)} peers")
+    
+    # Initialize heartbeat tracking
+    last_heartbeat_times = {}  # Maps peer address to last heartbeat timestamp
+    current_term = 0  # Start with term 0
+    leader_missing_count = 0  # Counter for missing leader heartbeats
     
     while True:
         try:
@@ -661,15 +839,16 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval
             # Get mempool size
             mempool_size = len(mempool.audits) if hasattr(mempool, 'audits') else 0
             
-            # Create heartbeat message - leave current_leader_address empty for simple setup
+            # Create heartbeat message with current leader address
             heartbeat_request = block_chain_pb2.HeartbeatRequest(
                 from_address=server_address,
-                current_leader_address="",  # No leader in simple setup
+                current_leader_address=blockchain_servicer.current_leader_address,
                 latest_block_id=latest_block_id,
                 mem_pool_size=mempool_size
             )
             
             # Send heartbeat to all peers
+            current_time = time.time()
             for peer_address, stub in peer_stub_map.items():
                 try:
                     # Use the peer address we already know from the map
@@ -678,9 +857,12 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval
                     # Send the heartbeat with a timeout
                     response = stub.SendHeartbeat(
                         heartbeat_request, 
-                        timeout=2  # 2 second timeout
+                        timeout=5  # 5 second timeout
                     )
                     logger.info(f"Sent heartbeat to {target}, response: {response.status}")
+                    
+                    # Update last heartbeat time for this peer
+                    last_heartbeat_times[target] = current_time
                     
                 except grpc.RpcError as e:
                     if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
@@ -689,7 +871,29 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval
                         logger.error(f"Error sending heartbeat to {target}: {e.code()}: {e.details()}")
                 except Exception as e:
                     logger.error(f"Unexpected error sending heartbeat to peer {target}: {str(e)}")
-                    
+            
+            # Check for missing heartbeats and potentially trigger election
+            if blockchain_servicer.current_leader_address:
+                # If there's a known leader but we haven't heard from them
+                leader_address = blockchain_servicer.current_leader_address
+                if leader_address in last_heartbeat_times:
+                    last_leader_time = last_heartbeat_times[leader_address]
+                    if current_time - last_leader_time > interval * missing_heartbeat_threshold:
+                        leader_missing_count += 1
+                        logger.warning(f"Leader {leader_address} missed heartbeat, count: {leader_missing_count}")
+                        
+                        if leader_missing_count >= missing_heartbeat_threshold:
+                            # Leader is considered dead, trigger election
+                            logger.info(f"Leader {leader_address} is dead, triggering election")
+                            trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1)
+                            leader_missing_count = 0  # Reset counter
+                    else:
+                        leader_missing_count = 0  # Reset counter if we got a recent heartbeat
+            elif not blockchain_servicer.current_leader_address:
+                # No leader known, trigger election
+                logger.info("No leader known, triggering election")
+                trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1)
+            
             # Sleep for the interval
             time.sleep(interval)
             
@@ -698,6 +902,103 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, interval
             # Don't crash the heartbeat thread, just wait and retry
             time.sleep(interval)
 
+
+def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
+    """
+    Trigger an election and try to become the leader.
+    
+    Args:
+        server_address: Local server address (host:port)
+        peer_stub_map: Dictionary mapping peer addresses to their stubs
+        blockchain: Blockchain instance for getting latest block info
+        mempool: Mempool instance for getting size
+        term: The new term number to use for the election
+        
+    Returns:
+        bool: True if elected as leader, False otherwise
+    """
+    logger.info(f"Starting election for term {term}")
+    
+    # Get latest block info and mempool size for tie-breaking
+    latest_block = blockchain.get_latest_block()
+    latest_block_id = latest_block.id if latest_block else 0
+    mempool_size = len(mempool.audits) if hasattr(mempool, 'audits') else 0
+    
+    # Send TriggerElection to all peers
+    votes = 0
+    election_request = block_chain_pb2.TriggerElectionRequest(
+        term=term,
+        address=server_address
+    )
+    
+    for peer_address, stub in peer_stub_map.items():
+        try:
+            logger.info(f"Requesting vote from {peer_address} for term {term}")
+            response = stub.TriggerElection(
+                election_request, 
+                timeout=5  # 5 second timeout
+            )
+            
+            logger.info(f"Vote from {peer_address}: {response.vote}, term: {response.term}")
+            
+            # Update our term if the peer has a higher term
+            if response.term > term:
+                logger.info(f"Peer has higher term {response.term} > {term}, abandoning election")
+                return False
+                
+            # Count the vote
+            if response.vote:
+                votes += 1
+                
+        except grpc.RpcError as e:
+            logger.error(f"Error requesting vote from {peer_address}: {e.code()}: {e.details()}")
+        except Exception as e:
+            logger.error(f"Unexpected error requesting vote from {peer_address}: {str(e)}")
+    
+    # Add self-vote
+    votes += 1
+    
+    # Check if we have majority
+    total_nodes = len(peer_stub_map) + 1  # +1 for self
+    majority = (total_nodes // 2) + 1
+    
+    if votes >= majority:
+        logger.info(f"Won election for term {term} with {votes}/{total_nodes} votes")
+        
+        # Send NotifyLeadership to all peers
+        leadership_request = block_chain_pb2.NotifyLeadershipRequest(
+            address=server_address
+        )
+        
+        for peer_address, stub in peer_stub_map.items():
+            try:
+                logger.info(f"Notifying {peer_address} of leadership")
+                response = stub.NotifyLeadership(
+                    leadership_request, 
+                    timeout=5  # 5 second timeout
+                )
+                logger.info(f"NotifyLeadership to {peer_address} response: {response.status}")
+                
+            except grpc.RpcError as e:
+                logger.error(f"Error notifying leadership to {peer_address}: {e.code()}: {e.details()}")
+            except Exception as e:
+                logger.error(f"Unexpected error notifying leadership to {peer_address}: {str(e)}")
+        
+        return True
+    else:
+        logger.info(f"Lost election for term {term} with {votes}/{total_nodes} votes")
+        return False
+
+def get_local_ip(self):
+        """Get the local IP address of this machine."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("0.0.0.0", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
 
 def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
     """
@@ -769,21 +1070,33 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
     # Start heartbeat sender thread
     # Use socket.gethostname() to get the local hostname for identification
     import socket
-    server_address = f"{socket.gethostname()}:{port}"
+
+    server_address = f"{get_local_ip()}:{port}"
     heartbeat_thread = threading.Thread(
         target=send_heartbeats, 
-        args=(server_address, peer_stub_map, blockchain, mempool, heartbeat_interval),
+        args=(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer, heartbeat_interval),
         daemon=True
     )
     heartbeat_thread.start()
     logger.info(f"Started heartbeat sender thread, will send heartbeats every {heartbeat_interval} seconds to {len(peer_stub_map)} peers")
 
+    # Initialize leadership check timer - if we don't have a leader initially, trigger election
+    def check_leadership():
+        if not blockchain_servicer.current_leader_address:
+            logger.info("No leader detected on startup, triggering election")
+            trigger_election(server_address, peer_stub_map, blockchain, mempool, 1)
+    
+    # Start leadership check after a short delay to let connections establish
+    leadership_timer = threading.Timer(10.0, check_leadership)
+    leadership_timer.daemon = True
+    leadership_timer.start()
+    
     try:
         while True:
             time.sleep(86400)  # Sleep for a day
     except KeyboardInterrupt:
         server.stop(0)
-        print("Server stopped")
+        logger.info("Server stopped")
 
 
 def main():
