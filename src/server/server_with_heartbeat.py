@@ -704,12 +704,10 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         # Check if this is a special request to get mempool contents
         if request.from_address == "LEADER_GET_MEMPOOL":
             # This is a special request from the leader to get mempool contents
-            logger.info("Leader node is requesting mempool contents")
 
             # Get the requested number of audits from the mempool
             max_audits = request.mem_pool_size if request.mem_pool_size > 0 else 50
             pending_audits = self.mempool.get_oldest_audits(count=max_audits)
-            logger.info(f"Returning {len(pending_audits)} pending audits to leader node")
 
             # Serialize audits list to JSON in error_message field (no proto change)
             try:
@@ -1229,9 +1227,16 @@ def create_and_propose_blocks(server_address, peer_stub_map, blockchain, mempool
             if mempool_size >= min_audits:
                 logger.info(f"CREATING BLOCK: Found {mempool_size} audits in mempool, creating a new block (minimum required: {min_audits})")
                 
-                # Get audits from mempool
+                # Atomically take-and-remove audits from mempool
                 with mempool.lock:
-                    audits = list(mempool.audits)[:min_audits]  # Take only what we need
+                    reserved_audits = []
+                    for _ in range(min_audits):
+                        if not mempool.audits:
+                            break
+                        reserved_audits.append(mempool.audits.popleft())
+                
+                # Use reserved_audits to build the block
+                audits = reserved_audits
                 
                 # Create the block
                 # Get latest block for chaining
@@ -1371,15 +1376,15 @@ def get_local_ip():
                 
         # Fallback to hardcoded IP if we still don't have a valid one
         if not ip.startswith("169.254"):
-            ip = "169.254.45.104"  # Your specific IP in the private network
+            ip = "169.254.199.100"  # Your specific IP in the private network
             
         logger.info(f"Using private network IP address: {ip}")
         return ip
     except Exception as e:
         logger.error(f"Error getting private network IP: {str(e)}")
         # Default to your known private network IP
-        logger.warning(f"Using hardcoded private network IP address: 169.254.45.104")
-        return "169.254.45.104"
+        logger.warning(f"Using hardcoded private network IP address: 169.254.199.100")
+        return "169.254.199.100"
 
 def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable_sync=False):
     """
@@ -1393,7 +1398,7 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable
         disable_sync: If True, do not automatically sync blocks from peers
     """
     # Load configuration if peer_addresses not provided
-    if peer_addresses is None:
+    if (peer_addresses is None) and (config_file is not None):
         try:
             config = load_config(config_file)
             peer_addresses = get_peer_addresses(config)

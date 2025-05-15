@@ -11,7 +11,7 @@ peers:
   # - address: "169.254.137.247:50051" # ronak
   # - address: "169.254.55.120:50051" # brandon
   # - address: "169.254.103.106:50051" # jayasurya
-  # - address: "169.254.44.212:50051" # anthony
+  - address: "169.254.44.212:50051" # anthony
 
 # Server configuration
 server:
