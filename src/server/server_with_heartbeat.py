@@ -663,6 +663,16 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
 
     def SendHeartbeat(self, request, context):
         logger.info(f"Received heartbeat from {request.from_address}")
+        
+        # Initialize peer_latest_block_ids dictionary if it doesn't exist
+        if not hasattr(self, 'peer_latest_block_ids'):
+            self.peer_latest_block_ids = {}
+        
+        # Store the peer's latest block ID for block sync monitoring
+        if request.latest_block_id > 0 and request.from_address:
+            # Update our records of which peers have which blocks
+            self.peer_latest_block_ids[request.from_address] = request.latest_block_id
+            logger.debug(f"Updated block info for {request.from_address}, latest block: {request.latest_block_id}")
 
         # Check if this is a special request to get mempool contents
         if request.from_address == "LEADER_GET_MEMPOOL":
@@ -691,6 +701,10 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         if request.current_leader_address and not self.current_leader_address:
             logger.info(f"Learning about leader {request.current_leader_address} from heartbeat")
             self.current_leader_address = request.current_leader_address
+        
+        # Get our latest block for the response
+        latest_block = self.blockchain.get_latest_block()
+        our_latest_block_id = latest_block.id if latest_block else 0
         
         # Process the heartbeat
         return block_chain_pb2.HeartbeatResponse(status="success")
@@ -884,14 +898,14 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, blockcha
                         if leader_missing_count >= missing_heartbeat_threshold:
                             # Leader is considered dead, trigger election
                             logger.info(f"Leader {leader_address} is dead, triggering election")
-                            trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1)
+                            trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1, blockchain_servicer)
                             leader_missing_count = 0  # Reset counter
                     else:
                         leader_missing_count = 0  # Reset counter if we got a recent heartbeat
             elif not blockchain_servicer.current_leader_address:
                 # No leader known, trigger election
                 logger.info("No leader known, triggering election")
-                trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1)
+                trigger_election(server_address, peer_stub_map, blockchain, mempool, current_term + 1, blockchain_servicer)
             
             # Sleep for the interval
             time.sleep(interval)
@@ -902,7 +916,7 @@ def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, blockcha
             time.sleep(interval)
 
 
-def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
+def trigger_election(server_address, peer_stub_map, blockchain, mempool, term, blockchain_servicer=None):
     """
     Trigger an election and try to become the leader.
     
@@ -912,6 +926,7 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
         blockchain: Blockchain instance for getting latest block info
         mempool: Mempool instance for getting size
         term: The new term number to use for the election
+        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
         
     Returns:
         bool: True if elected as leader, False otherwise
@@ -964,6 +979,12 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
     if votes >= majority:
         logger.info(f"Won election for term {term} with {votes}/{total_nodes} votes")
         
+        # Update our own leader status
+        if blockchain_servicer:
+            blockchain_servicer.current_leader_address = server_address
+            blockchain_servicer.is_leader = True
+            logger.info(f"Setting self as leader. My address: {server_address}")
+        
         # Send NotifyLeadership to all peers
         leadership_request = block_chain_pb2.NotifyLeadershipRequest(
             address=server_address
@@ -983,10 +1004,310 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term):
             except Exception as e:
                 logger.error(f"Unexpected error notifying leadership to {peer_address}: {str(e)}")
         
+        # Start block proposal thread now that we're the leader
+        logger.info("Starting automatic block proposal thread as the new leader")
+        block_proposal_thread = threading.Thread(
+            target=create_and_propose_blocks,
+            args=(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer),
+            daemon=True
+        )
+        block_proposal_thread.start()
+        
         return True
     else:
         logger.info(f"Lost election for term {term} with {votes}/{total_nodes} votes")
         return False
+
+def sync_missing_blocks(server_address, peer_stub_map, blockchain):
+    """
+    Synchronize missing blocks from peers.
+    
+    This function is called when a node starts up or detects it's missing blocks.
+    It queries peers for their latest block ID and syncs all missing blocks.
+    
+    Args:
+        server_address: Local server address (host:port)
+        peer_stub_map: Dictionary mapping peer addresses to their stubs
+        blockchain: Blockchain instance for getting and adding blocks
+    """
+    logger.info("Starting block synchronization process")
+    
+    # Get our latest block ID
+    latest_block = blockchain.get_latest_block()
+    our_latest_block_id = latest_block.id if latest_block else -1
+    logger.info(f"Our latest block ID: {our_latest_block_id}")
+    
+    # Keep track of peers' latest block IDs
+    peer_latest_blocks = {}
+    highest_block_id = our_latest_block_id
+    sync_source = None
+    
+    # Query peers for their latest block IDs through heartbeat
+    for peer_address, stub in peer_stub_map.items():
+        try:
+            # Create a heartbeat message to exchange blockchain info
+            heartbeat_request = block_chain_pb2.HeartbeatRequest(
+                from_address=server_address,
+                current_leader_address="",  # Not setting leader
+                latest_block_id=our_latest_block_id,
+                mem_pool_size=0
+            )
+            
+            # Send the request
+            response = stub.SendHeartbeat(heartbeat_request, timeout=5)
+            
+            # Store the peer's latest block ID from the response
+            # In a real implementation, we would add this to the HeartbeatResponse
+            # Since we can't modify the proto, we'll make a dummy request to get the block
+            try:
+                # Try to get a block with a very high ID to see what error we get
+                test_response = stub.GetBlock(block_chain_pb2.GetBlockRequest(id=1000000))
+            except grpc.RpcError as e:
+                # This will likely fail, but we can parse the error to find the latest block ID
+                if "highest block ID is" in e.details():
+                    # Extract the highest block ID from the error message
+                    import re
+                    match = re.search(r"highest block ID is (\d+)", e.details())
+                    if match:
+                        peer_block_id = int(match.group(1))
+                        peer_latest_blocks[peer_address] = peer_block_id
+                        logger.info(f"Peer {peer_address} has latest block ID: {peer_block_id}")
+                        
+                        # Update the highest block ID seen
+                        if peer_block_id > highest_block_id:
+                            highest_block_id = peer_block_id
+                            sync_source = peer_address
+            
+        except Exception as e:
+            logger.error(f"Error querying peer {peer_address} for latest block: {str(e)}")
+    
+    # If no peers or all peers have same or lower block ID, no sync needed
+    if not sync_source:
+        logger.info("No synchronization needed, our chain is up to date")
+        return
+    
+    logger.info(f"Syncing {highest_block_id - our_latest_block_id} blocks from peer {sync_source}")
+    
+    # Sync blocks from the peer with the highest block ID
+    stub = peer_stub_map[sync_source]
+    for block_id in range(our_latest_block_id + 1, highest_block_id + 1):
+        try:
+            # Get the block from the peer
+            response = stub.GetBlock(block_chain_pb2.GetBlockRequest(id=block_id))
+            
+            if response.status == "success" and response.block:
+                # Add the block to our chain
+                if blockchain.add_block(response.block):
+                    logger.info(f"Successfully synced block {block_id} from peer {sync_source}")
+                else:
+                    logger.error(f"Failed to add block {block_id} to our chain")
+                    # If we can't add a block, stop syncing to maintain chain integrity
+                    break
+            else:
+                logger.error(f"Failed to get block {block_id} from peer {sync_source}: {response.error_message}")
+                break
+                
+        except Exception as e:
+            logger.error(f"Error syncing block {block_id} from peer {sync_source}: {str(e)}")
+            break
+    
+    # Check if we successfully synced all blocks
+    latest_block = blockchain.get_latest_block()
+    new_latest_id = latest_block.id if latest_block else -1
+    if new_latest_id == highest_block_id:
+        logger.info(f"Successfully synchronized all missing blocks. Chain now at block {new_latest_id}")
+    else:
+        logger.warning(f"Partial synchronization completed. Chain now at block {new_latest_id}, target was {highest_block_id}")
+
+def block_sync_monitor(server_address, peer_stub_map, blockchain, blockchain_servicer, interval=30):
+    """
+    Continuously monitor the network for missing blocks and sync them.
+    
+    This function runs as a background thread to ensure this node always
+    stays in sync with the blockchain network.
+    
+    Args:
+        server_address: Local server address (host:port)
+        peer_stub_map: Dictionary mapping peer addresses to their stubs
+        blockchain: Blockchain instance for getting and adding blocks
+        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
+        interval: How often to check for missing blocks (in seconds)
+    """
+    logger.info(f"Starting block synchronization monitor thread, checking every {interval} seconds")
+    
+    # Keep track of heartbeat responses that include latest block IDs
+    peer_block_info = {}
+    
+    while True:
+        try:
+            # Get our latest block ID
+            latest_block = blockchain.get_latest_block()
+            our_latest_block_id = latest_block.id if latest_block else -1
+            
+            # Check heartbeat data to see if any peers have newer blocks
+            sync_needed = False
+            for peer_address, block_id in peer_block_info.items():
+                if block_id > our_latest_block_id:
+                    logger.info(f"Detected peer {peer_address} has newer blocks (ID: {block_id}, ours: {our_latest_block_id})")
+                    sync_needed = True
+                    break
+                    
+            # If we've detected newer blocks, sync them
+            if sync_needed:
+                sync_missing_blocks(server_address, peer_stub_map, blockchain)
+            
+            # Wait for next check
+            time.sleep(interval)
+            
+            # Update peer_block_info based on heartbeat data
+            # This is where we'd collect the block IDs from heartbeats received
+            # For efficiency, we access the shared data that the heartbeat function collects
+            if hasattr(blockchain_servicer, 'peer_latest_block_ids'):
+                peer_block_info = blockchain_servicer.peer_latest_block_ids.copy()
+            
+        except Exception as e:
+            logger.error(f"Error in block sync monitor: {str(e)}")
+            # Don't crash the monitor thread, just wait and retry
+            time.sleep(interval)
+
+def create_and_propose_blocks(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer, min_audits=3):
+    """
+    Automatically create and propose blocks when there are enough audits in the mempool.
+    This function runs as a background thread when the node is the leader.
+    
+    Args:
+        server_address: Local server address (host:port)
+        peer_stub_map: Dictionary mapping peer addresses to their stubs
+        blockchain: Blockchain instance for getting latest block info
+        mempool: Mempool instance for getting audits
+        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
+        min_audits: Minimum number of audits needed to create a block (default: 3)
+    """
+    logger.info(f"Starting automatic block proposal thread, minimum audits: {min_audits}")
+    
+    while True:
+        try:
+            # Check if we're still the leader
+            if server_address != blockchain_servicer.current_leader_address:
+                logger.info(f"Not the leader (current leader: {blockchain_servicer.current_leader_address}), stopping block proposal thread")
+                return
+            
+            # Log our current status as leader and mempool status
+            with mempool.lock:
+                mempool_size = len(mempool.audits)
+                
+            logger.info(f"Leader status check - I am the leader ({server_address}). Mempool size: {mempool_size}/{min_audits} required audits")
+                
+            # Check if there are enough audits in the mempool
+            if mempool_size >= min_audits:
+                logger.info(f"CREATING BLOCK: Found {mempool_size} audits in mempool, creating a new block (minimum required: {min_audits})")
+                
+                # Get audits from mempool
+                with mempool.lock:
+                    audits = list(mempool.audits)[:min_audits]  # Take only what we need
+                
+                # Create the block
+                # Get latest block for chaining
+                latest_block = blockchain.get_latest_block()
+                block_id = 1 if latest_block is None else latest_block.id + 1
+                previous_hash = "" if latest_block is None else latest_block.hash
+                
+                # Build merkle root
+                audit_ids = [audit.req_id for audit in audits]
+                merkle_root = ""
+                if audit_ids:
+                    # Hash the leaves
+                    leaves = [hashlib.sha256(audit_id.encode()).hexdigest() for audit_id in audit_ids]
+                    
+                    # Build the tree
+                    current_level = leaves
+                    while len(current_level) > 1:
+                        next_level = []
+                        
+                        # Ensure even number of nodes at current level for pairing
+                        if len(current_level) % 2 == 1:
+                            current_level.append(current_level[-1])
+                            
+                        # Pair nodes and compute parent nodes
+                        for i in range(0, len(current_level), 2):
+                            left = current_level[i]
+                            right = current_level[i+1]
+                            
+                            # Create parent hash
+                            parent = hashlib.sha256((left + right).encode()).hexdigest()
+                            next_level.append(parent)
+                            
+                        # Move to the next level
+                        current_level = next_level
+                    
+                    merkle_root = current_level[0]
+                
+                # Create block hash
+                data = f"{block_id}{previous_hash}{merkle_root}".encode()
+                block_hash = hashlib.sha256(data).hexdigest()
+                
+                # Create block message
+                block = block_chain_pb2.Block(
+                    id=block_id,
+                    hash=block_hash,
+                    previous_hash=previous_hash,
+                    audits=audits,
+                    merkle_root=merkle_root,
+                )
+                
+                logger.info(f"Created block {block_id} with {len(audits)} audits, proposing to peers")
+                
+                # Propose the block to all peers and require unanimous agreement
+                all_agreed = True
+                peer_responses = {}
+                
+                for peer_address, stub in peer_stub_map.items():
+                    try:
+                        logger.info(f"Proposing block {block_id} to {peer_address}")
+                        response = stub.ProposeBlock(block)
+                        peer_responses[peer_address] = response
+                        
+                        if not response.vote:
+                            all_agreed = False
+                            logger.warning(f"Peer {peer_address} rejected block: {response.error_message}")
+                            
+                    except Exception as e:
+                        all_agreed = False
+                        logger.error(f"Error proposing block to {peer_address}: {str(e)}")
+                
+                # If all peers agreed, commit the block
+                if all_agreed and peer_stub_map:  # Make sure we have at least one peer
+                    logger.info(f"All peers agreed to block {block_id}, committing")
+                    
+                    # Save block locally first
+                    if blockchain.add_block(block):
+                        logger.info(f"Block {block_id} added to local blockchain")
+                        
+                        # Remove the audits from local mempool
+                        audit_ids = [audit.req_id for audit in audits]
+                        mempool.remove_audits(audit_ids)
+                        
+                        # Commit the block to all peers
+                        for peer_address, stub in peer_stub_map.items():
+                            try:
+                                logger.info(f"Committing block {block_id} to {peer_address}")
+                                response = stub.CommitBlock(block)
+                                if response.status != "success":
+                                    logger.warning(f"Peer {peer_address} failed to commit block: {response.error_message}")
+                            except Exception as e:
+                                logger.error(f"Error committing block to {peer_address}: {str(e)}")
+                    else:
+                        logger.error(f"Failed to add block {block_id} to local blockchain")
+                else:
+                    logger.warning(f"Block proposal rejected by one or more peers, not committing block {block_id}")
+            
+            # Sleep for a bit before checking again
+            time.sleep(5)
+                
+        except Exception as e:
+            logger.error(f"Error in block proposal loop: {str(e)}")
+            # Don't crash the proposal thread, just wait and retry
+            time.sleep(5)
 
 def get_local_ip():
     """Get the local IP address of this machine in a private network."""
@@ -1023,17 +1344,17 @@ def get_local_ip():
                 
         # Fallback to hardcoded IP if we still don't have a valid one
         if not ip.startswith("169.254"):
-            ip = "169.254.185.37"  # Your specific IP in the private network
+            ip = "169.254.45.104"  # Your specific IP in the private network
             
         logger.info(f"Using private network IP address: {ip}")
         return ip
     except Exception as e:
         logger.error(f"Error getting private network IP: {str(e)}")
         # Default to your known private network IP
-        logger.warning(f"Using hardcoded private network IP address: 169.254.185.37")
-        return "169.254.185.37"
+        logger.warning(f"Using hardcoded private network IP address: 169.254.45.104")
+        return "169.254.45.104"
 
-def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
+def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable_sync=False):
     """
     Start the server as a follower node.
 
@@ -1042,6 +1363,7 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
         peer_addresses: List of peer addresses (will be loaded from config if None)
         slot_duration: Not used in follower-only mode
         config_file: Path to configuration file (optional)
+        disable_sync: If True, do not automatically sync blocks from peers
     """
     # Load configuration if peer_addresses not provided
     if peer_addresses is None:
@@ -1113,17 +1435,99 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None):
     heartbeat_thread.start()
     logger.info(f"Started heartbeat sender thread, will send heartbeats every {heartbeat_interval} seconds to {len(peer_stub_map)} peers")
 
+    # Variable to track if block proposal thread is running
+    block_proposal_thread_started = False
+    
     # Initialize leadership check timer - if we don't have a leader initially, trigger election
     def check_leadership():
+        nonlocal block_proposal_thread_started
+        
         if not blockchain_servicer.current_leader_address:
             logger.info("No leader detected on startup, triggering election")
-            trigger_election(server_address, peer_stub_map, blockchain, mempool, 1)
+            if trigger_election(server_address, peer_stub_map, blockchain, mempool, 1, blockchain_servicer):
+                # We won the election, set ourselves as leader
+                blockchain_servicer.current_leader_address = server_address
+                blockchain_servicer.is_leader = True
+                logger.info(f"Election succeeded, setting self as leader: {server_address}")
+                
+                # Start block proposal thread
+                if not block_proposal_thread_started:
+                    block_proposal_thread_started = True
+                    logger.info(f"Starting automatic block proposal thread as leader with {len(mempool.audits)} audits in mempool")
+                    block_proposal_thread = threading.Thread(
+                        target=create_and_propose_blocks,
+                        args=(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer),
+                        daemon=True
+                    )
+                    block_proposal_thread.start()
+        
+        elif server_address == blockchain_servicer.current_leader_address:
+            # We're already the leader, start block proposal if not already
+            if not block_proposal_thread_started:
+                block_proposal_thread_started = True
+                logger.info(f"We are the leader, starting automatic block proposal thread with {len(mempool.audits)} audits in mempool")
+                block_proposal_thread = threading.Thread(
+                    target=create_and_propose_blocks,
+                    args=(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer),
+                    daemon=True
+                )
+                block_proposal_thread.start()
     
     # Start leadership check after a short delay to let connections establish
     leadership_timer = threading.Timer(10.0, check_leadership)
     leadership_timer.daemon = True
     leadership_timer.start()
     
+    # Also create a periodic check for leadership status 
+    def periodic_leadership_check():
+        nonlocal block_proposal_thread_started
+        
+        while True:
+            try:
+                time.sleep(15)  # Check every 15 seconds
+                
+                # If we are the leader but proposal thread is not running, start it
+                if server_address == blockchain_servicer.current_leader_address and not block_proposal_thread_started:
+                    block_proposal_thread_started = True
+                    logger.info(f"Periodic check: We are the leader, starting automatic block proposal thread with {len(mempool.audits)} audits in mempool")
+                    block_proposal_thread = threading.Thread(
+                        target=create_and_propose_blocks,
+                        args=(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer),
+                        daemon=True
+                    )
+                    block_proposal_thread.start()
+                
+                # If proposal thread is marked as running but we're not leader anymore, reset flag
+                if server_address != blockchain_servicer.current_leader_address and block_proposal_thread_started:
+                    logger.info("No longer the leader, resetting block proposal thread status")
+                    block_proposal_thread_started = False
+                    
+            except Exception as e:
+                logger.error(f"Error in periodic leadership check: {str(e)}")
+    
+    # Start periodic leadership check
+    periodic_check_thread = threading.Thread(
+        target=periodic_leadership_check,
+        daemon=True
+    )
+    periodic_check_thread.start()
+    
+    # Start block synchronization process (if not disabled)
+    if not disable_sync:
+        logger.info("Performing initial block synchronization...")
+        sync_missing_blocks(server_address, peer_stub_map, blockchain)
+        
+        # Start block synchronization monitor thread
+        block_sync_thread = threading.Thread(
+            target=block_sync_monitor, 
+            args=(server_address, peer_stub_map, blockchain, blockchain_servicer),
+            daemon=True
+        )
+        block_sync_thread.start()
+        logger.info("Started block synchronization monitor thread")
+    else:
+        logger.info("Block synchronization is disabled (--disable-sync flag set)")
+
     try:
         while True:
             time.sleep(86400)  # Sleep for a day
@@ -1139,10 +1543,12 @@ def main():
     parser.add_argument("--peers", nargs="*", default=None, help="Peer addresses (overrides config file)")
     parser.add_argument("--config", type=str, default=None, 
                        help="Path to configuration file (default: config.yaml in project root)")
+    parser.add_argument("--disable-sync", action="store_true", 
+                       help="Disable automatic block synchronization")
 
     args = parser.parse_args()
 
-    serve(args.port, args.peers, config_file=args.config)
+    serve(args.port, args.peers, config_file=args.config, disable_sync=args.disable_sync)
 
 
 if __name__ == "__main__":

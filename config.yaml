@@ -4,7 +4,7 @@
 # Peer server configuration
 peers:
   # - address: "169.254.103.61:50052" # sameer
-  # - address: "169.254.185.37:50051" # serhat
+  # - address: "169.254.199.100:50051" # serhat
   # - address: "169.254.159.92:50053" # suriya
   # - address: "169.254.183.161:50051" # harsha
   # - address: "169.254.13.100:50051" # yash

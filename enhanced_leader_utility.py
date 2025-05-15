@@ -118,15 +118,15 @@ class BlockchainLeader:
                     
             # Fallback to hardcoded IP if we still don't have a valid one
             if not ip.startswith("169.254"):
-                ip = "169.254.185.37"  # Your specific IP in the private network
+                ip = "169.254.45.104"  # Your specific IP in the private network
                 
             logger.info(f"Using private network IP address: {ip}")
             return ip
         except Exception as e:
             logger.error(f"Error getting private network IP: {str(e)}")
             # Default to your known private network IP
-            logger.warning(f"Using hardcoded private network IP address: 169.254.185.37")
-            return "169.254.185.37"
+            logger.warning(f"Using hardcoded private network IP address: 169.254.45.104")
+            return "169.254.45.104"
                 
     def get_direct_audits_from_peer(self, peer_address, max_audits=50):
         """
