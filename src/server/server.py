@@ -181,11 +181,10 @@ class FileAuditServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
                 print(f"Audit {request.req_id} already in mempool, not adding duplicate")
 
         # Create a response
+        # Note: Only including fields defined in the proto
         response = file_audit_pb2.FileAuditResponse(
             req_id=request.req_id, 
-            status="success",
-            blockchain_tx_hash=blockchain_tx_hash,
-            block_header=block_header
+            status="success"
         )
 
         return response

@@ -132,12 +132,10 @@ class FileAuditClient:
         """
         try:
             response = self.stub.SubmitAudit(file_audit)
-            # If there's a blockchain transaction hash, print it
-            if hasattr(response, 'blockchain_tx_hash') and response.blockchain_tx_hash:
-                print(f"Blockchain transaction hash: {response.blockchain_tx_hash}")
-            if hasattr(response, 'block_header') and response.block_header.block_hash:
-                print(f"Included in block: {response.block_header.block_hash}")
-                print(f"Block number: {response.block_header.block_number}")
+            # Just print the status of the response
+            print(f"Response status: {response.status}")
+            if response.error_message:
+                print(f"Response message: {response.error_message}")
             return response
         except grpc.RpcError as e:
             print(f"RPC error: {e.code()}: {e.details()}")
@@ -212,8 +210,6 @@ def run_client(server_address, file_path, num_audits=1, delay=2):
         
         if response:
             print(f"Audit submitted successfully: {response.status}")
-            if hasattr(response, 'blockchain_tx_hash') and response.blockchain_tx_hash:
-                print(f"Blockchain transaction hash: {response.blockchain_tx_hash}")
         else:
             print("Failed to submit audit")
         
@@ -236,7 +232,7 @@ def main():
     """Main function for client operations."""
     parser = argparse.ArgumentParser(description="Submit file audits to a server")
     parser.add_argument("--file", default="testfile.txt", help="File to audit")
-    parser.add_argument("--server-address", default="169.254.13.100:50051", 
+    parser.add_argument("--server-address", default="169.254.44.212:50051", 
                         help="Address of the audit server")
     parser.add_argument("--num-audits", type=int, default=1,
                         help="Number of audits to submit")

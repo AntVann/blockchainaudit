@@ -77,17 +77,51 @@ class BlockchainLeader:
         self.blockchain_dir = "blockchain"
         os.makedirs(self.blockchain_dir, exist_ok=True)
             
-    def get_local_ip(self):
-        """Get the local IP address of this machine."""
+    def get_local_ip():
+        """Get the local IP address of this machine in a private network."""
         try:
+            # For a private network with only two computers,
+            # try connecting to the peer to get the correct interface
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("0.0.0.0", 80))
+            
+            s.connect(("0.0.0.0", 80))  
             ip = s.getsockname()[0]
             s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
             
+            # Verify we have a proper IP for the private network
+            if not ip.startswith("169.254"):
+                # If the automatic detection didn't work, try to find all available IPs
+                import subprocess
+                import re
+                
+                # Get all network interfaces using ifconfig (available on macOS)
+                try:
+                    output = subprocess.check_output(["ifconfig"], universal_newlines=True)
+                    # Look for 169.254.x.x addresses in the output
+                    # Pattern for IPv4 addresses
+                    pattern = r'inet\s+(\d+\.\d+\.\d+\.\d+)'
+                    addresses = re.findall(pattern, output)
+                    
+                    # Find the first 169.254.x.x address
+                    for addr in addresses:
+                        if addr.startswith('169.254'):
+                            ip = addr
+                            break
+                except Exception:
+                    logger.warning("Could not detect interface with ifconfig")
+                    
+            # Fallback to hardcoded IP if we still don't have a valid one
+            if not ip.startswith("169.254"):
+                ip = "169.254.185.37"  # Your specific IP in the private network
+                
+            logger.info(f"Using private network IP address: {ip}")
+            return ip
+        except Exception as e:
+            logger.error(f"Error getting private network IP: {str(e)}")
+            # Default to your known private network IP
+            logger.warning(f"Using hardcoded private network IP address: 169.254.185.37")
+            return "169.254.185.37"
+                
     def get_direct_audits_from_peer(self, peer_address, max_audits=50):
         """
         Get audits directly from a peer using a special mechanism without modifying the proto.
