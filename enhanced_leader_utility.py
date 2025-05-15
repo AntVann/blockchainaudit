@@ -27,11 +27,17 @@ import json
 import grpc
 import threading
 from concurrent import futures
+import logging
+
 
 # Add the project root to the Python path
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
+
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 from src.generated import (
     block_chain_pb2,
@@ -77,7 +83,7 @@ class BlockchainLeader:
         self.blockchain_dir = "blockchain"
         os.makedirs(self.blockchain_dir, exist_ok=True)
             
-    def get_local_ip():
+    def get_local_ip(self):
         """Get the local IP address of this machine in a private network."""
         try:
             # For a private network with only two computers,
@@ -220,10 +226,11 @@ class BlockchainLeader:
             # Parse JSON list of audit dicts from error_message
             import json
             from google.protobuf.json_format import ParseDict
+            from src.generated import common_pb2
             audit_dicts = json.loads(resp.error_message or '[]')
             audits = []
             for d in audit_dicts:
-                fa = file_audit_pb2.FileAudit()
+                fa = common_pb2.FileAudit()
                 ParseDict(d, fa)
                 audits.append(fa)
             print(f"Retrieved {len(audits)} pending audits from mempool")
@@ -314,7 +321,6 @@ class BlockchainLeader:
             previous_hash=previous_hash,
             audits=audits,
             merkle_root=merkle_root,
-            timestamp=int(time.time())
         )
         
         return block
@@ -513,11 +519,34 @@ def main():
                        help="Block ID to propose (defaults to latest + 1, or 0)")
     parser.add_argument("--genesis", action="store_true",
                        help="Create genesis block with empty previous_hash")
+    parser.add_argument("--require-audits", action="store_true",
+                       help="Wait until at least one audit is available in mempool before creating a block")
     
     args = parser.parse_args()
     
     # Create leader and run the block creation process
     leader = BlockchainLeader(config_file=args.config, server_address=args.server)
+    
+    # If requiring audits, wait until at least one is available
+    if args.require_audits:
+        max_retries = 30  # Maximum number of retries
+        retry_delay = 2   # Seconds between retries
+        
+        print("Waiting for audits to appear in mempool...")
+        for attempt in range(1, max_retries + 1):
+            audits = leader.get_pending_audits(max_audits=1)
+            if audits:
+                print(f"Found {len(audits)} audit(s) after {attempt} attempt(s)")
+                break
+            
+            if attempt < max_retries:
+                print(f"No audits found, retrying in {retry_delay} seconds (attempt {attempt}/{max_retries})...")
+                time.sleep(retry_delay)
+            else:
+                print("Maximum retries reached, no audits found in mempool")
+                return False
+    
+    # Create and propose the block
     leader.create_and_propose_block(block_id=args.block_id, genesis=args.genesis)
 
 
