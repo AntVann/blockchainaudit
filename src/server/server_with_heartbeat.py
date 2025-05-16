@@ -970,6 +970,7 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term, b
         address=server_address
     )
     
+    reachable_peers = 0
     for peer_address, stub in peer_stub_map.items():
         try:
             logger.info(f"Requesting vote from {peer_address} for term {term}")
@@ -985,6 +986,7 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term, b
                 logger.info(f"Peer has higher term {response.term} > {term}, abandoning election")
                 return False
                 
+            reachable_peers += 1
             # Count the vote
             if response.vote:
                 votes += 1
@@ -997,9 +999,14 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term, b
     # Add self-vote
     votes += 1
     
-    # Check if we have majority
     total_nodes = len(peer_stub_map) + 1  # +1 for self
-    majority = (total_nodes // 2) + 1
+
+
+    if reachable_peers == 0:
+        majority = 1
+    else:
+        # Check if we have majority
+        majority = (total_nodes // 2) + 1
     
     if votes >= majority:
         logger.info(f"Won election for term {term} with {votes}/{total_nodes} votes")
@@ -1376,15 +1383,15 @@ def get_local_ip():
                 
         # Fallback to hardcoded IP if we still don't have a valid one
         if not ip.startswith("169.254"):
-            ip = "169.254.199.100"  # Your specific IP in the private network
+            ip = "169.254.44.212"  # Your specific IP in the private network
             
         logger.info(f"Using private network IP address: {ip}")
         return ip
     except Exception as e:
         logger.error(f"Error getting private network IP: {str(e)}")
         # Default to your known private network IP
-        logger.warning(f"Using hardcoded private network IP address: 169.254.199.100")
-        return "169.254.199.100"
+        logger.warning(f"Using hardcoded private network IP address: 169.254.44.212")
+        return "169.254.44.212"
 
 def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable_sync=False):
     """
@@ -1398,7 +1405,7 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable
         disable_sync: If True, do not automatically sync blocks from peers
     """
     # Load configuration if peer_addresses not provided
-    if (peer_addresses is None) and (config_file is not None):
+    if peer_addresses is None:
         try:
             config = load_config(config_file)
             peer_addresses = get_peer_addresses(config)
@@ -1506,7 +1513,7 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable
                 block_proposal_thread.start()
     
     # Start leadership check after a short delay to let connections establish
-    leadership_timer = threading.Timer(10.0, check_leadership)
+    leadership_timer = threading.Timer(30.0, check_leadership)
     leadership_timer.daemon = True
     leadership_timer.start()
     

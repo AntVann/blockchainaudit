@@ -3,15 +3,17 @@
 
 # Peer server configuration
 peers:
-  # - address: "169.254.103.61:50052" # sameer
-  # - address: "169.254.199.100:50051" # serhat
+  - address: "169.254.113.197:50052" # sameer
+  # - address: "169.254.57.41:50051" # serhat
   # - address: "169.254.159.92:50053" # suriya
   # - address: "169.254.183.161:50051" # harsha
   # - address: "169.254.13.100:50051" # yash
-  # - address: "169.254.137.247:50051" # ronak
-  # - address: "169.254.55.120:50051" # brandon
-  # - address: "169.254.103.106:50051" # jayasurya
-  - address: "169.254.44.212:50051" # anthony
+  - address: "169.254.62.157:50051" # ronak
+  - address: "169.254.55.120:50051" # brandon
+  # - address: "169.254.55.120:50052" # brandon2
+  - address: "169.254.178.176:50051" # jayasurya
+  - address: "169.254.168.103:50052" # rutuja
+  # - address: "169.254.44.212:50051" # anthony
 
 # Server configuration
 server:
