@@ -72,12 +72,7 @@ class Mempool:
         self.lock = threading.Lock()
 
     def add_audit(self, audit):
-        """
-        Add an audit to the mempool.
-
-        Args:
-            audit: FileAudit protobuf message
-        """
+    
         with self.lock:
             self.audits.append(audit)
             print(
@@ -85,15 +80,7 @@ class Mempool:
             )
 
     def get_audits(self, count=None):
-        """
-        Get audits from the mempool.
-
-        Args:
-            count: Number of audits to get. If None, get all.
-
-        Returns:
-            list: List of FileAudit protobuf messages
-        """
+        
         with self.lock:
             if count is None or count >= len(self.audits):
                 # Return all audits
@@ -108,15 +95,7 @@ class Mempool:
                 return audits
     
     def get_oldest_audits(self, count=50):
-        """
-        Get the oldest audits from the mempool, sorted by timestamp.
         
-        Args:
-            count: Maximum number of audits to return (default: 50)
-            
-        Returns:
-            list: List of FileAudit protobuf messages, sorted by timestamp (oldest first)
-        """
         with self.lock:
             # Convert to list and sort by timestamp
             all_audits = list(self.audits)
@@ -126,12 +105,7 @@ class Mempool:
             return sorted_audits[:min(count, len(sorted_audits))]
 
     def remove_audits(self, audit_ids):
-        """
-        Remove audits from the mempool.
-
-        Args:
-            audit_ids: List of audit IDs to remove
-        """
+        
         with self.lock:
             # Count how many audits will actually be removed
             audits_before = len(self.audits)
@@ -150,29 +124,13 @@ class FileAuditServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
     """Servicer for the FileAuditService."""
 
     def __init__(self, mempool, blockchain_stubs, blockchain=None):
-        """
-        Initialize the servicer.
-
-        Args:
-            mempool: Mempool for storing unprocessed requests
-            blockchain_stubs: List of stubs for blockchain services
-            blockchain: Blockchain instance for checking if audit is included in a block
-        """
+        
         self.mempool = mempool
         self.blockchain_stubs = blockchain_stubs
         self.blockchain = blockchain
 
     def SubmitAudit(self, request, context):
-        """
-        Handle a SubmitAudit request.
-
-        Args:
-            request: FileAudit protobuf message
-            context: gRPC context
-
-        Returns:
-            FileAuditResponse: Response to the client
-        """
+        
         print(f"Received audit request: {request.req_id}")
 
         # Verify the signature
@@ -218,7 +176,6 @@ class FileAuditServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
                 print(f"Audit {request.req_id} already in mempool, not adding duplicate")
 
         # Create a response
-        # Note: Only including fields defined in the proto
         response = file_audit_pb2.FileAuditResponse(
             req_id=request.req_id, 
             status="success"
@@ -227,15 +184,7 @@ class FileAuditServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
         return response
 
     def _verify_signature(self, audit):
-        """
-        Verify the signature of an audit.
-
-        Args:
-            audit: FileAudit protobuf message
-
-        Returns:
-            bool: True if signature is valid, False otherwise
-        """
+        
         # Create a copy of the audit without signature and public_key
         audit_dict = {
             "req_id": audit.req_id,
@@ -299,13 +248,6 @@ def build_merkle_tree(audit_ids):
     """
     Build a Merkle tree for a list of audit IDs and return the root hash.
     
-    Args:
-        audit_ids: List of audit request IDs
-        
-    Returns:
-        tuple: (merkle_root, proof_map)
-            - merkle_root: The root hash of the Merkle tree
-            - proof_map: Dictionary mapping audit IDs to their Merkle proofs
     """
     if not audit_ids:
         return "", {}
@@ -356,8 +298,7 @@ class Blockchain:
     def __init__(self, blocks_dir="blockchain"):
         """Initialize blockchain and load existing blocks if available.
         
-        Args:
-            blocks_dir: Directory to store blockchain data
+    
         """
         self.blocks = []  # List of blocks, chronologically ordered
         self.block_map = {}  # Maps block hashes to blocks
@@ -411,11 +352,7 @@ class Blockchain:
         """
         Add a validated block to the blockchain.
         
-        Args:
-            block: Block protobuf message
-            
-        Returns:
-            bool: True if added successfully, False otherwise
+        
         """
         with self.lock:
             # Check if this is the genesis block (id=0)
@@ -446,8 +383,7 @@ class Blockchain:
     def _save_block_to_disk(self, block):
         """Save a block to disk.
         
-        Args:
-            block: Block protobuf message
+
         """
         try:
             # Convert protobuf to dict for JSON serialization
@@ -481,11 +417,6 @@ class Blockchain:
         """
         Get a block by its hash.
         
-        Args:
-            block_hash: Hash of the block to get
-            
-        Returns:
-            Block protobuf message or None if not found
         """
         with self.lock:
             # Make sure we're looking up by the correct field
@@ -501,11 +432,6 @@ class Blockchain:
         """
         Get a block by its number.
         
-        Args:
-            block_number: Number of the block to get (corresponds to block.id)
-            
-        Returns:
-            Block protobuf message or None if not found
         """
         with self.lock:
             # First try to find it by position in the array
@@ -529,9 +455,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Initialize the servicer.
 
-        Args:
-            mempool: Mempool for storing unprocessed requests
-            blockchain: Blockchain for storing finalized blocks
         """
         self.mempool = mempool
         self.blockchain = blockchain if blockchain else Blockchain()
@@ -546,12 +469,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Handle a WhisperAuditRequest request.
 
-        Args:
-            request: FileAudit protobuf message
-            context: gRPC context
-
-        Returns:
-            WhisperResponse: Response to the whisper
         """
         print(f"Received whispered audit: {request.req_id}")
 
@@ -573,12 +490,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Handle a ProposeBlock request.
 
-        Args:
-            request: Block protobuf message
-            context: gRPC context
-
-        Returns:
-            BlockVoteResponse: Response to the block proposal
         """
         print(f"Received block proposal: {request.id}")
 
@@ -622,12 +533,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Handle a CommitBlock request.
 
-        Args:
-            request: Block protobuf message
-            context: gRPC context
-
-        Returns:
-            BlockCommitResponse: Response to the block commit
         """
         print(f"Received block commit: {request.id}")
 
@@ -672,13 +577,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def GetBlock(self, request, context):
         """
         Handle a GetBlock request.
-
-        Args:
-            request: GetBlockRequest protobuf message
-            context: gRPC context
-
-        Returns:
-            GetBlockResponse: Response with the requested block
         """
         print(f"Received request for block: {request.id}")
 
@@ -742,11 +640,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Verify the signature of an audit.
 
-        Args:
-            audit: FileAudit protobuf message
-
-        Returns:
-            bool: True if signature is valid, False otherwise
         """
         # Create a copy of the audit without signature and public_key
         audit_dict = {
@@ -782,12 +675,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         Handle a TriggerElection request.
 
-        Args:
-            request: TriggerElectionRequest protobuf message
-            context: gRPC context
-
-        Returns:
-            TriggerElectionResponse: Response with vote decision
         """
         logger.info(f"Received election request from {request.address} for term {request.term}")
         
@@ -835,13 +722,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def NotifyLeadership(self, request, context):
         """
         Handle a NotifyLeadership request.
-
-        Args:
-            request: NotifyLeadershipRequest protobuf message
-            context: gRPC context
-
-        Returns:
-            NotifyLeadershipResponse: Response to the leadership notification
         """
         logger.info(f"Received leadership notification from {request.address}")
         
@@ -855,15 +735,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
 def send_heartbeats(server_address, peer_stub_map, blockchain, mempool, blockchain_servicer, interval=5, missing_heartbeat_threshold=3):
     """
     Periodically send heartbeats to all connected peers and handle leader election.
-    
-    Args:
-        server_address: Local server address (host:port)
-        peer_stub_map: Dictionary mapping peer addresses to their stubs
-        blockchain: Blockchain instance for getting latest block info
-        mempool: Mempool instance for getting size
-        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
-        interval: Interval in seconds between heartbeats
-        missing_heartbeat_threshold: Number of missing heartbeats to trigger an election
+ 
     """
     logger.info(f"Starting heartbeat sender, sending every {interval} seconds to {len(peer_stub_map)} peers")
     
@@ -949,16 +821,6 @@ def trigger_election(server_address, peer_stub_map, blockchain, mempool, term, b
     """
     Trigger an election and try to become the leader.
     
-    Args:
-        server_address: Local server address (host:port)
-        peer_stub_map: Dictionary mapping peer addresses to their stubs
-        blockchain: Blockchain instance for getting latest block info
-        mempool: Mempool instance for getting size
-        term: The new term number to use for the election
-        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
-        
-    Returns:
-        bool: True if elected as leader, False otherwise
     """
     logger.info(f"Starting election for term {term}")
     
@@ -1061,10 +923,7 @@ def sync_missing_blocks(server_address, peer_stub_map, blockchain):
     This function is called when a node starts up or detects it's missing blocks.
     It queries peers for their latest block ID and syncs all missing blocks.
     
-    Args:
-        server_address: Local server address (host:port)
-        peer_stub_map: Dictionary mapping peer addresses to their stubs
-        blockchain: Blockchain instance for getting and adding blocks
+    
     """
     logger.info("Starting block synchronization process")
     
@@ -1184,12 +1043,7 @@ def block_sync_monitor(server_address, peer_stub_map, blockchain, blockchain_ser
     This function runs as a background thread to ensure this node always
     stays in sync with the blockchain network.
     
-    Args:
-        server_address: Local server address (host:port)
-        peer_stub_map: Dictionary mapping peer addresses to their stubs
-        blockchain: Blockchain instance for getting and adding blocks
-        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
-        interval: How often to check for missing blocks (in seconds)
+    
     """
     logger.info(f"Starting block synchronization monitor thread, checking every {interval} seconds")
     
@@ -1232,14 +1086,7 @@ def create_and_propose_blocks(server_address, peer_stub_map, blockchain, mempool
     """
     Automatically create and propose blocks when there are enough audits in the mempool.
     This function runs as a background thread when the node is the leader.
-    
-    Args:
-        server_address: Local server address (host:port)
-        peer_stub_map: Dictionary mapping peer addresses to their stubs
-        blockchain: Blockchain instance for getting latest block info
-        mempool: Mempool instance for getting audits
-        blockchain_servicer: The BlockChainServiceServicer instance to access shared state
-        min_audits: Minimum number of audits needed to create a block (default: 3)
+ 
     """
     logger.info(f"Starting automatic block proposal thread, minimum audits: {min_audits}")
     
@@ -1423,12 +1270,7 @@ def serve(port, peer_addresses=None, slot_duration=10, config_file=None, disable
     """
     Start the server as a follower node.
 
-    Args:
-        port: Port to listen on
-        peer_addresses: List of peer addresses (will be loaded from config if None)
-        slot_duration: Not used in follower-only mode
-        config_file: Path to configuration file (optional)
-        disable_sync: If True, do not automatically sync blocks from peers
+
     """
     # Load configuration if peer_addresses not provided
     if peer_addresses is None:
