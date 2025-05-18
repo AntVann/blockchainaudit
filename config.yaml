@@ -6,7 +6,7 @@ peers:
   - address: "169.254.113.197:50052" # sameer
   # - address: "169.254.57.41:50051" # serhat
   # - address: "169.254.159.92:50053" # suriya
-  # - address: "169.254.183.161:50051" # harsha
+  - address: "169.254.183.161:50051" # harsha
   # - address: "169.254.13.100:50051" # yash
   - address: "169.254.62.157:50051" # ronak
   - address: "169.254.55.120:50051" # brandon

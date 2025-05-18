@@ -518,6 +518,7 @@ class Blockchain:
                 if block.id == block_number:
                     return block
             
+            # Block not found
             return None
 
 
@@ -539,6 +540,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         self.voted_for = None  # Keep track of who this server voted for in the current term
         self.heartbeat_timestamps = {}  # Map of server address to last heartbeat timestamp
         self.is_leader = False  # Whether this server is the leader
+        self.peer_latest_block_ids = {}  # Map of peer address to their latest block ID
 
     def WhisperAuditRequest(self, request, context):
         """
@@ -680,20 +682,22 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """
         print(f"Received request for block: {request.id}")
 
+        # Get the latest block ID for error reporting
+        latest_block = self.blockchain.get_latest_block()
+        latest_block_id = latest_block.id if latest_block else -1
+
         block = self.blockchain.get_block_by_number(request.id)
         if block:
             return block_chain_pb2.GetBlockResponse(block=block, status="success")
         else:
+            # Include the highest block ID in the error message to help with syncing
             return block_chain_pb2.GetBlockResponse(
-                status="failure", error_message="Block not found"
+                status="failure", 
+                error_message=f"Block not found. The highest block ID is {latest_block_id}"
             )
 
     def SendHeartbeat(self, request, context):
         logger.info(f"Received heartbeat from {request.from_address}")
-        
-        # Initialize peer_latest_block_ids dictionary if it doesn't exist
-        if not hasattr(self, 'peer_latest_block_ids'):
-            self.peer_latest_block_ids = {}
         
         # Store the peer's latest block ID for block sync monitoring
         if request.latest_block_id > 0 and request.from_address:
@@ -1088,27 +1092,49 @@ def sync_missing_blocks(server_address, peer_stub_map, blockchain):
             # Send the request
             response = stub.SendHeartbeat(heartbeat_request, timeout=5)
             
-            # Store the peer's latest block ID from the response
-            # In a real implementation, we would add this to the HeartbeatResponse
-            # Since we can't modify the proto, we'll make a dummy request to get the block
+            # Get peer's latest block ID using the GetBlock method with a high ID
+            # This will trigger an error that contains the peer's highest block ID
             try:
                 # Try to get a block with a very high ID to see what error we get
                 test_response = stub.GetBlock(block_chain_pb2.GetBlockRequest(id=1000000))
+                # If we get here, the peer actually has this block (unlikely)
+                peer_block_id = 1000000
+                peer_latest_blocks[peer_address] = peer_block_id
+                logger.info(f"Peer {peer_address} has very high block ID: {peer_block_id}")
+                
+                # Update the highest block ID seen
+                if peer_block_id > highest_block_id:
+                    highest_block_id = peer_block_id
+                    sync_source = peer_address
             except grpc.RpcError as e:
-                # This will likely fail, but we can parse the error to find the latest block ID
-                if "highest block ID is" in e.details():
-                    # Extract the highest block ID from the error message
-                    import re
-                    match = re.search(r"highest block ID is (\d+)", e.details())
+                # This will fail, and now we can parse the error to find the latest block ID
+                error_details = e.details() if hasattr(e, 'details') else str(e)
+                # Try multiple patterns to extract the highest block ID from error messages
+                patterns = [
+                    r"highest block ID is (\d+)",
+                    r"Block not found\.\s+The highest block ID is (\d+)",
+                    r"latest block.*?(\d+)",
+                    r"highest.*?block.*?(\d+)"  # Most general pattern, try last
+                ]
+                
+                peer_block_id = None
+                for pattern in patterns:
+                    match = re.search(pattern, error_details, re.IGNORECASE)
                     if match:
-                        peer_block_id = int(match.group(1))
-                        peer_latest_blocks[peer_address] = peer_block_id
-                        logger.info(f"Peer {peer_address} has latest block ID: {peer_block_id}")
-                        
-                        # Update the highest block ID seen
-                        if peer_block_id > highest_block_id:
-                            highest_block_id = peer_block_id
-                            sync_source = peer_address
+                        try:
+                            peer_block_id = int(match.group(1))
+                            break
+                        except (ValueError, IndexError):
+                            continue
+                            
+                if peer_block_id is not None:
+                    peer_latest_blocks[peer_address] = peer_block_id
+                    logger.info(f"Peer {peer_address} has latest block ID: {peer_block_id}")
+                    
+                    # Update the highest block ID seen
+                    if peer_block_id > highest_block_id:
+                        highest_block_id = peer_block_id
+                        sync_source = peer_address
             
         except Exception as e:
             logger.error(f"Error querying peer {peer_address} for latest block: {str(e)}")
